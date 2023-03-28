@@ -18,7 +18,7 @@ I have not done much testing on it especially regarding the numerous different v
 QB tools uses fairly standard LZW compression on its files. It uses a code-size of 9 bits minimum, 16 bits maximum. The original C and ASM source code for quarterback is available publically, and I'll link it in the future. Because of the 16-bit maximum code-size, there's a drawback to compression performance on files over a couple hundred kilobytes. If there are repeated patterns not yet learned by the time all ~65k codes are filled, then the LZW dictionary will get no bigger. I have plans to have the script report the compression efficiency for each file as it's extracted.
 
 ```
-define FIRST_CODE	258				/* First free entry */
-define CLEAR_CODE	257				/* Table clear output code */
-define EOF_CODE 	256				/* Last entry of file */
+#define FIRST_CODE	258				/* First free entry */
+#define CLEAR_CODE	257				/* Table clear output code */
+#define EOF_CODE 	256				/* Last entry of file */
 ```
