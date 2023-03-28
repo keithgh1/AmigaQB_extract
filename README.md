@@ -9,7 +9,7 @@ This script uses standard Python3. There's nothing special or unique or exotic a
 
 You'll want to install PIP, if you've somehow used Python without it. And then install [numpy](https://numpy.org/install/) and [pandas](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
 
-# More details
+## More details
 This backup software was a popular HDD backup solution for the Commodore Amiga. The genesis of this project was that I had a couple corrupted disks within my backup set, and Quarterback, despite having SOME builtin protection against it, fails as soon as it encounters some corrupted data. QB also requires a catalog which is stored on the first and last floppy in the backup set, in order to extract the files. My tool works on standalone disks within the set without the catalog.
 
 However, because there's no catalog support, there's a major limitation in the current, very beta, version. The original directory information IS NOT stored alongside the individual files, and so all files are simply written to the current directory.
