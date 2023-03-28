@@ -7,7 +7,7 @@ This python script is designed to accept the Central Coast Software's Quarterbac
 
 This script uses standard Python3. There's nothing special or unique or exotic about the installation, and this script should function fine on Windows, OSX, and Linux. I developed it mostly using Jupyter Notebook, but tested it on Ubuntu 22.04.
 
-You'll want to install PIP, if you've somehow used Python without it. And then install [numpy](https://numpy.org/install/) and [pandas](https://pages.github.com/](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
+You'll want to install PIP, if you've somehow used Python without it. And then install [numpy](https://numpy.org/install/) and [pandas](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
 
 This backup software was a popular HDD backup solution for the Commodore Amiga. The genesis of this project was that I had a couple corrupted disks within my backup set, and Quarterback, despite having SOME builtin protection against it, fails as soon as it encounters some corrupted data. QB also requires a catalog which is stored on the first and last floppy in the backup set, in order to extract the files. My tool works on standalone disks within the set without the catalog.
 
