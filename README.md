@@ -12,3 +12,11 @@ There is support for a backup set spanning multiple disks. Once ADF'd, combine t
 Because of the way LZW builds a new dictionary for every file, any corruption within a current file makes the rest of the file unreadable. The data prior to the corruption is safe.
 
 I have not done much testing on it especially regarding the numerous different versions of quarterback, but more is planned. It's possible that some minor modifications are needed to support it, please email me the details and a sample ADF if possible, and I'll try my best to fix it.
+
+## LZW Details
+
+QB tools uses fairly standard LZW compression on its files. It uses a code-size of 9 bits minimum, 16 bits maximum. The original C and ASM source code for quarterback is available publically, and I'll link it in the future. Because of the 16-bit maximum code-size, there's a drawback to compression performance on files over a couple hundred kilobytes. If there are repeated patterns not yet learned by the time all ~65k codes are filled, then the LZW dictionary will get no bigger. I have plans to have the script report the compression efficiency for each file as it's extracted.
+
+define FIRST_CODE	258				/* First free entry */
+define CLEAR_CODE	257				/* Table clear output code */
+define EOF_CODE 	256				/* Last entry of file */
