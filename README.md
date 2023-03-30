@@ -1,7 +1,7 @@
 # AmigaQB_extract
 Amiga Quarterback ADF file extractor
 
-This python script is designed to accept the Central Coast Software's Quarterback backup disks as .ADF files, identify the CFM file markers within the file, and perform the LZW decompression algorithm on raw datastream, and write those decompressed files back to the current directory.
+This python script is designed to accept the Central Coast Software's Quarterback backup disks as .ADF files, identify the CFM file markers within the file, and perform the LZW decompression algorithm on raw datastream, and write those decompressed files back into a qb_dump subdirectory of the current directory. **You must create a qb_dump folder!**
 
 ## Dependencies
 
