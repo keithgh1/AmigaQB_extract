@@ -18,6 +18,9 @@ However, because **there's no catalog support**, there's a major limitation in t
 
 There is support for a backup set spanning multiple disks. Once ADF'd, combine the ADF's into a single file, concatenating one disk after the others. The disk must be 901120 bytes long, and they should be in order. Once the ADF's are named properly, using cat within linux and redirecting the output is sufficient to build a massive disk file. Then, just execute this script against the file.
 
+Example: Let's say your files are numbered like this 01.adf, 02.adf, and 03.adf. Your command to concatenate those together might look like this:
+`cat *.adf > combined.adf`
+
 Because of the way LZW builds a new dictionary for every file, any corruption within a current file makes the rest of the file unreadable. The data prior to the corruption is safe.
 
 I have not done much testing on it especially regarding the numerous different versions of quarterback, but more is planned. It's possible that some minor modifications are needed to support it, please email me the details and a sample ADF if possible, and I'll try my best to fix it.
