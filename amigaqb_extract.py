@@ -170,6 +170,7 @@ df = pd.DataFrame(data=d)
 # yes, yes, I should be use argparse
 if len(sys.argv) != 2:
     print("Usage: python3 amigaqb_extract.py backup-filename-to-process")
+
     sys.exit()
 
 fullfile = np.fromfile(sys.argv[1], dtype=np.ubyte)
@@ -209,132 +210,129 @@ else:
         fullfile = np.delete(fullfile, np.concatenate(
             [np.arange(start, end) for start, end in Qb_list]))
 
-# look for CFM 0x90 pattern in file headers
+# look for CFM 0x90 pattern or FMRK (uncompressed file mark) in file headers
 # What would happen if that pattern shows up in the regular compressed data?
 # What's the probability of it? Pretty low me thinks?
 
-searchval = [0x43, 0x46, 0x4D, 0x90]
-N = len(searchval)
-possibles = np.where(fullfile == searchval[0])[0]
+# Define search values with ASCII tags
+searchval1 = {'value': [0x43, 0x46, 0x4D, 0x90], 'tag': 'CFM90'}
+searchval2 = {'value': [0x46, 0x4D, 0x52, 0x4B], 'tag': 'FMRK'}
+
+# Combine both search values into a list
+search_values = [searchval1, searchval2]
 
 offset_list = []
 
-for p in possibles:
-    check = fullfile[p:p+N]
-    if np.all(check == searchval):
-        offset_list.append(p)
+for searchval in search_values:
+    N = len(searchval['value'])
+    possibles = np.where(fullfile == searchval['value'][0])[0]
+
+    for p in possibles:
+        check = fullfile[p:p+N]
+        if np.all(check == searchval['value']):
+            offset_list.append({'tag': searchval['tag'], 'offset': p})
 
 logging.debug(offset_list)
 filelist = []
 
 print("Found the following files:\n")
 for offset in offset_list:
+    
+    tag = offset['tag']
+    offset = offset['offset']
 
-    FILENAME = "".join([chr(item) for item in fullfile[offset+4:offset+34]])
+    #print(f"Search value {tag} found at offset {offset}.")
+
+    FILENAME = "".join([chr(item) for item in fullfile[offset+4:offset+34]]).split('\x00', 1)[0]
+
     # print(FILENAME)
 
     filesize1bits = np.unpackbits(fullfile[offset+36:offset+40])
     filesize1 = filesize1bits.dot(2**np.arange(filesize1bits.size)[::-1])
 
-    filelist.append([offset, FILENAME.rstrip('\x00'),
-                    filesize1, 0, 'Nocontent', '', ''])
+    filelist.append([offset, FILENAME,
+                    filesize1, 0, tag, '', ''])
 
 df = pd.DataFrame(filelist, columns=[
-                  'Offset', 'FILENAME', 'Filesize1', 'Filesize2', 'State', 'CompressedData',
-                  'UncompressedData'])
-print(df[['Offset', 'FILENAME', 'Filesize1']])
+                'Offset', 'FILENAME', 'Filesize1', 'Filesize2', 'FileType', 'CompressedData',
+                'UncompressedData'])
+print(df[['Offset', 'FILENAME', 'Filesize1', 'FileType']])
 
 for j in range(0, len(filelist)):
-    CFM_offset = filelist[j][0]
 
-    END_LZW_DATASTREAM = 0
+    if filelist[j][4] == 'CFM90':
+        # If it's compressed, then uncompress it.
 
-    if j == len(filelist)-1:
-        END_LZW_DATASTREAM = len(fullfile)
-    elif j < len(filelist):
-        NEXT_CFM_offset = filelist[j+1][0]
+        CFM_offset = filelist[j][0]
 
-    START_LZW_DATASTREAM = CFM_offset+40
+        END_LZW_DATASTREAM = 0
 
-    # ie the end of the datastream doesn't end at the end of current file
-    if END_LZW_DATASTREAM == 0:
+        if j == len(filelist)-1:
+            END_LZW_DATASTREAM = len(fullfile)
+        elif j < len(filelist):
+            NEXT_CFM_offset = filelist[j+1][0]
 
-        # I hate this section of code but heck if I can figure out how to find the filesize1
-        # identified after the FILENAME and look for it to determine end of the raw LZW
-        # datastream. This should work for all cases
-        # This is necessary because there's a variable amount of padding
-        # (none, 1, 2, 3 bytes) between filesize2 and the next CFM block. This changes
-        # the end of data stream location depending on padding length
+        START_LZW_DATASTREAM = CFM_offset+40
 
-        candidate1bits = np.unpackbits(
-            fullfile[NEXT_CFM_offset-4:NEXT_CFM_offset])
-        candidate1size = candidate1bits.dot(
-            2**np.arange(candidate1bits.size)[::-1])
+        # ie the end of the datastream doesn't end at the end of current file
+        if END_LZW_DATASTREAM == 0:
 
-        candidate2bits = np.unpackbits(
-            fullfile[NEXT_CFM_offset-5:NEXT_CFM_offset-1])
-        candidate2size = candidate2bits.dot(
-            2**np.arange(candidate2bits.size)[::-1])
+            # This is necessary to identify the variable amount of padding
+            # (none, 1, 2, 3 bytes) between filesize2 and the next CFM block. This changes
+            # the end of data stream location depending on padding length
 
-        candidate3bits = np.unpackbits(
-            fullfile[NEXT_CFM_offset-6:NEXT_CFM_offset-2])
-        candidate3size = candidate3bits.dot(
-            2**np.arange(candidate3bits.size)[::-1])
+            # Define the range of candidates
+            candidates = range(4)
 
-        candidate4bits = np.unpackbits(
-            fullfile[NEXT_CFM_offset-7:NEXT_CFM_offset-3])
-        candidate4size = candidate4bits.dot(
-            2**np.arange(candidate4bits.size)[::-1])
+            # Loop through the candidates
+            for i in candidates:
+                # Calculate the bits and size for each candidate
+                candidate_bits = np.unpackbits(fullfile[NEXT_CFM_offset-4-i:NEXT_CFM_offset-i])
+                candidate_size = candidate_bits.dot(2**np.arange(candidate_bits.size)[::-1])
 
-        if candidate1size == filelist[j][2]:
-            END_LZW_DATASTREAM = NEXT_CFM_offset-4
+                # Check if the candidate size matches the filelist size
+                if candidate_size == filelist[j][2]:
+                    END_LZW_DATASTREAM = NEXT_CFM_offset-4-i
+                    break
 
-        elif candidate2size == filelist[j][2]:
-            END_LZW_DATASTREAM = NEXT_CFM_offset-5
+        # sys.stdout.write("Processing ")
+        print(filelist[j][1], " at Offset ",
+            START_LZW_DATASTREAM, "-", END_LZW_DATASTREAM)
 
-        elif candidate3size == filelist[j][2]:
-            END_LZW_DATASTREAM = NEXT_CFM_offset-6
+        logging.debug("%s at Offset %s - %s",filelist[j][1],
+                    START_LZW_DATASTREAM, END_LZW_DATASTREAM)
 
-        elif candidate4size == filelist[j][2]:
-            END_LZW_DATASTREAM = NEXT_CFM_offset-7
-
-        else:
-            # This shouldn't happen....
-            END_LZW_DATASTREAM = 99999999
-
-    # sys.stdout.write("Processing ")
-    print(filelist[j][1], " at Offset ",
-          START_LZW_DATASTREAM, "-", END_LZW_DATASTREAM)
-
-    logging.debug("%s at Offset %s - %s",filelist[j][1],
-                  START_LZW_DATASTREAM, END_LZW_DATASTREAM)
-
-    # raw datastream continues at qb02 position + 16
-
-    filelist[j][6] = uncompressme(
-        fullfile[START_LZW_DATASTREAM:END_LZW_DATASTREAM])
-
-    if len(filelist[j][6]) == filelist[j][2]:
-        print("Size check good.\n")
-        filelist[j][5] = "Decompressed OK"
-    else:
-        # print("LZW decompression returned the wrong amount of data\n")
-
-        # For like 5 or 6% of my test data, we need to bump the end position by 1
-        # I have no clue why this is, maybe something to do more with variable padding?
-        # This fixes those special cases
+        # raw datastream continues at qb02 position + 16
 
         filelist[j][6] = uncompressme(
-            fullfile[START_LZW_DATASTREAM:END_LZW_DATASTREAM+1])
+            fullfile[START_LZW_DATASTREAM:END_LZW_DATASTREAM])
+
         if len(filelist[j][6]) == filelist[j][2]:
             print("Size check good.\n")
-            filelist[j][5] = "Decompressed OK on +1 retry"
+            filelist[j][5] = "Decompressed OK"
         else:
-            print("ERROR Size expected:", filelist[j][2])
-            print("ERROR Size returned:", len(filelist[j][6]))
-            if filelist[j][6] == "DEADBEEF":
-                print("Bad code_size detected")
-            filelist[j][5] = "Bad Size"
+            # print("LZW decompression returned the wrong amount of data\n")
+
+            # For like 5 or 6% of my test data, we need to bump the end position by 1
+            # I have no clue why this is, maybe something to do more with variable padding?
+            # This fixes those special cases
+
+            filelist[j][6] = uncompressme(
+                fullfile[START_LZW_DATASTREAM:END_LZW_DATASTREAM+1])
+            if len(filelist[j][6]) == filelist[j][2]:
+                print("Size check good.\n")
+                filelist[j][5] = "Decompressed OK on +1 retry"
+            else:
+                print("ERROR Size expected:", filelist[j][2])
+                print("ERROR Size returned:", len(filelist[j][6]))
+                if filelist[j][6] == "DEADBEEF":
+                    print("Bad code_size detected")
+                filelist[j][5] = "Bad Size"
+
+    elif tag == 'FMRK':
+        # processing an uncompressed file couldn't be easier. Just advance past the header
+        # and take filesize bytes.
+        filelist[j][6] = fullfile[filelist[j][0]+40:filelist[j][0]+filelist[j][2]+40]
 
     with open("qb_dump/"+filelist[j][1], "wb") as binary_file:
         binary_file.write(filelist[j][6])
