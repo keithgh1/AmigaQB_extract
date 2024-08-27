@@ -13,10 +13,11 @@ import logging
 import numpy as np
 import pandas as pd
 
+__version__ = "0.3.0"
+
 pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 1000)
-
 
 def hexdisplay(data):
     """
@@ -170,6 +171,7 @@ df = pd.DataFrame(data=d)
 # yes, yes, I should be use argparse
 if len(sys.argv) != 2:
     print("Usage: python3 amigaqb_extract.py backup-filename-to-process")
+    print(f"Script Version: {__version__}")
 
     sys.exit()
 
