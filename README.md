@@ -47,6 +47,7 @@ This release almost triples the lines of code of the original version! This is a
 * Rewrites the bit manipulation code extraction for compression, which broke under newer versions of python
 * Checks the python version to insure required 'f' support
 * Refactors a bunch of functions to make them easier to read, including added docstrings.
+* Used tools like autopep8, vermin, and pylint to improve code quality
 
 August 2024: Version 0.3.0
 
