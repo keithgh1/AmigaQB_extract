@@ -54,3 +54,6 @@ This release almost triples the lines of code of the original version! This is a
 August 2024: Version 0.3.0
 
 Minor changes including support for FMRK uncompressed files
+
+Copyright (c) 2024 Keith Monahan
+Licensed under the MIT License. See LICENSE file in the project root for full license information.
