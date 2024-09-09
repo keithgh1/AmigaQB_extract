@@ -39,6 +39,8 @@ QB tools uses fairly standard LZW compression on its files. It uses a code-size 
 
 Sept 9th, 2024: Version 0.4.0
 
+This version would have been delayed without the help from the Potato King from Reddit who figured out that the file catalog is encrypted even when encryption is disabled. Just realizing that fact, with a nudge to look in Monitor.C was exactly what I needed to add this support!
+
 This release almost triples the lines of code of the original version! This is a massive rewrite which adds a ton of features:
 
 * Adds primary backup catalog parsing, which now will create the original directories, and match file entries with markers
