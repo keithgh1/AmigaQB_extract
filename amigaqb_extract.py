@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 # logging.basicConfig(FILENAME='qb_event.log', encoding='utf-8', level=logging.DEBUG)
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # Minimum required version
 REQUIRED_PYTHON = (3, 6)
@@ -258,6 +258,18 @@ def generate_path(path_stack, filename, os_type='linux'):
     path = separator.join([p[0] for p in path_stack]) + separator + filename
     return path
 
+def is_valid_path(path):
+    try:
+        # Normalize the path and check for illegal characters
+        valid_path = os.path.normpath(path)
+        if not valid_path or set('<>:"|?*').intersection(valid_path):
+            return False
+        # Check if path length is acceptable (depending on the OS)
+        if len(valid_path) > 255:
+            return False
+        return True
+    except Exception:
+        return False
 
 def process_dirfibs(dirfibs):
     """
@@ -280,7 +292,18 @@ def process_dirfibs(dirfibs):
             path_stack.append((dir_fib.df_name, dir_fib.df_filcnt))
             dir_path = generate_path(path_stack, '', os_type='windows')
             dir_fib.df_name = dir_path  # Update the name to the full path
-            os.makedirs(dir_path, exist_ok=True)
+            
+            try:
+                # Check if the directory path is valid
+                if is_valid_path(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                else:
+                    print(f"Invalid directory path: {dir_path}")
+            except (OSError, ValueError) as e:
+                print(f"Error creating directory: {dir_path}")
+                print(e)
+                # Reset the path stack if there is an error
+                path_stack = [(DEFAULT_PATH, 0xBADCAFE)]
 
         elif dir_fib.df_flags & FLAG_SEL_MASK:  # File
             file_path = generate_path(
@@ -787,8 +810,8 @@ def main():
         decrypted_catalog = decrypt_data(
             full_file[0:offset_list[0]['offset']], full_file[0xD])
 
-        with open("decryptedcat.bin", "wb") as binary_file:
-            binary_file.write(bytes(decrypted_catalog))
+        #with open("decryptedcat.bin", "wb") as binary_file:
+            #binary_file.write(bytes(decrypted_catalog))
 
         # Parse DirFib entries using the specified header length
         dir_fibs = parse_dir_fibs(
