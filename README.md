@@ -27,6 +27,31 @@ I have not done much testing on it especially regarding the numerous different v
 
 Source code to the original Quarterback tools are available here: https://gitlab.com/amigasourcecodepreservation/quarterback
 
+## Usage
+
+Please note that the backup file provided is typically a 901,120 byte .ADF file, or similar multiple-sized combined set of ADFs. This software does not yet work with a single large backup file that wasn't originally created as a series of floppy disks. This support should be easy enough to add, but the format is just different enough to require separate processing.
+
+If you get really screwy catalog processing results with the default header length of 20, then switch it to 16 to see if it makes a difference.
+
+```
+usage: amigaqb_extract.py [-h] [--catalog {primary,backup,ignore}] [--version] [--header-length {16,20}] backup_file
+
+Restore files from an Amiga Quarterback backup file.
+
+positional arguments:
+  backup_file           The backup filename to process
+
+options:
+  -h, --help            show this help message and exit
+  --catalog {primary,backup,ignore}
+                        Choose how to handle the catalog: 'primary' (default) will process the primary catalog at the beginning of the backup file,
+                        'backup' will process the backup catalog, 'ignore' will ignore the catalog and dump all restored files into the root qb_dump
+                        directory.
+  --version             show program's version number and exit
+  --header-length {16,20}
+                        Specify the header length of DirFib entries: '16' bytes for entries with one file size, '20' bytes (default) for entries with
+                        two file sizes.
+```
 ## LZW Details
 
 QB tools uses fairly standard LZW compression on its files. It uses a code-size of 9 bits minimum, 16 bits maximum. The original C and ASM source code for quarterback is available publically, and I'll link it in the future. Because of the 16-bit maximum code-size, there's a drawback to compression performance on files over a couple hundred kilobytes. If there are repeated patterns not yet learned by the time all ~65k codes are filled, then the LZW dictionary will get no bigger. I have plans to have the script report the compression efficiency for each file as it's extracted.
