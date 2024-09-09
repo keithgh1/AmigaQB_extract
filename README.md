@@ -14,7 +14,7 @@ This script requires Python 3.6 or greater. There's nothing special or unique or
 You'll want to install PIP, if you've somehow used Python without it. And then install [numpy](https://numpy.org/install/) and [pandas](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
 
 ## More details
-This backup software was a popular HDD backup solution for the Commodore Amiga. The genesis of this project was that I had a couple corrupted disks within my backup set, and Quarterback, despite having SOME builtin protection against it, fails as soon as it encounters some corrupted data. QB also requires a catalog which is stored on the first and last floppy in the backup set, in order to extract the files. My tool works on standalone disks within the set without the catalog.
+This backup software was a popular HDD backup solution for the Commodore Amiga. The genesis of this project was that I had a couple corrupted disks within my backup set, and Quarterback, despite having SOME builtin protection against it, fails as soon as it encounters some corrupted data. QB also requires a catalog which is stored on the first and last floppy in the backup set, in order to extract the files. My tool works on standalone disks within the set with or without the catalog.
 
 There is support for a backup set spanning multiple disks. Once ADF'd, combine the ADF's into a single file, concatenating one disk after the others. The disk must be 901120 bytes long, and they should be in order. Once the ADF's are named properly, using cat within linux and redirecting the output is sufficient to build a massive disk file. Then, just execute this script against the file.
 
@@ -24,6 +24,8 @@ Example: Let's say your files are numbered like this 01.adf, 02.adf, and 03.adf.
 Because of the way LZW builds a new dictionary for every file, any corruption within a current file makes the rest of the file unreadable. The data prior to the corruption is safe.
 
 I have not done much testing on it especially regarding the numerous different versions of quarterback, but more is planned. It's possible that some minor modifications are needed to support it, please email me the details and a sample ADF if possible, and I'll try my best to fix it.
+
+Source code to the original Quarterback tools are available here: https://gitlab.com/amigasourcecodepreservation/quarterback
 
 ## LZW Details
 
