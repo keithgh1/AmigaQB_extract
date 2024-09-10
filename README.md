@@ -64,6 +64,13 @@ QB tools uses fairly standard LZW compression on its files. It uses a code-size 
 
 ## Release History
 
+Sept 10th, 2024: Version 0.4.2
+
+* Minor update to address issue #8.
+* Any directory of filename parsed from the backup file is now run through pathvalidate's sanitize_path()
+* This prevents illegal characters from even being attempted to be written
+* Also added was try/except blocks around all file operations. This prevents the script from failing and allows for more graceful handling
+
 Sept 9th, 2024: Version 0.4.1
 
 * Minor update to sanitize directory names and catch file system errors when creating directories. More work needs done here.
