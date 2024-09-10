@@ -64,6 +64,11 @@ QB tools uses fairly standard LZW compression on its files. It uses a code-size 
 
 ## Release History
 
+Sept 9th, 2024: Version 0.4.1
+
+* Minor update to sanitize directory names and catch file system errors when creating directories. More work needs done here.
+* Removed the writing of the debug file decryptedcat.bin
+
 Sept 9th, 2024: Version 0.4.0
 
 This version would have been delayed without the help from the Potato King from Reddit who figured out that the file catalog is encrypted even when encryption is disabled. Just realizing that fact, with a nudge to look in Monitor.C was exactly what I needed to add this support!
