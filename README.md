@@ -11,7 +11,7 @@ The current file markers supported are CFM for compressed files, and FMRK for un
 
 This script requires Python 3.6 or greater. There's nothing special or unique or exotic about the installation, and this script should function fine on Windows, OSX, and Linux. I developed it mostly using Jupyter Notebook, but tested it on Ubuntu 22.04. Also tested on Windows 11.
 
-You'll want to install PIP, if you've somehow used Python without it. And then install [numpy](https://numpy.org/install/) and [pandas](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
+You'll want to install PIP, if you've somehow used Python without it. And then install [pathvalidate](https://pypi.org/project/pathvalidate/), [numpy](https://numpy.org/install/) and [pandas](https://pandas.pydata.org/docs/getting_started/index.html#getting-started) using PIP.
 
 ## More details
 This backup software was a popular HDD backup solution for the Commodore Amiga. The genesis of this project was that I had a couple corrupted disks within my backup set, and Quarterback, despite having SOME builtin protection against it, fails as soon as it encounters some corrupted data. QB also requires a catalog which is stored on the first and last floppy in the backup set, in order to extract the files. My tool works on standalone disks within the set with or without the catalog.
