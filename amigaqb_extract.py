@@ -17,9 +17,10 @@ import struct
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
+from pathvalidate import sanitize_filename, sanitize_filepath
 
 # logging.basicConfig(FILENAME='qb_event.log', encoding='utf-8', level=logging.DEBUG)
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # Minimum required version
 REQUIRED_PYTHON = (3, 6)
@@ -246,8 +247,6 @@ def decrypt_data(data, encrypt_val):
     """Decrypt a list of byte values."""
     return [decrypt_byte(byte, encrypt_val) for byte in data]
 
-# Should we be using os.path.join() instead of this custom function?
-
 
 def generate_path(path_stack, filename, os_type='linux'):
     """ Define the separator based on the operating system type """
@@ -258,18 +257,6 @@ def generate_path(path_stack, filename, os_type='linux'):
     path = separator.join([p[0] for p in path_stack]) + separator + filename
     return path
 
-def is_valid_path(path):
-    try:
-        # Normalize the path and check for illegal characters
-        valid_path = os.path.normpath(path)
-        if not valid_path or set('<>:"|?*').intersection(valid_path):
-            return False
-        # Check if path length is acceptable (depending on the OS)
-        if len(valid_path) > 255:
-            return False
-        return True
-    except Exception:
-        return False
 
 def process_dirfibs(dirfibs):
     """
@@ -291,26 +278,27 @@ def process_dirfibs(dirfibs):
         if dir_fib.df_flags & FLAG_DIR_MASK:  # Directory
             path_stack.append((dir_fib.df_name, dir_fib.df_filcnt))
             dir_path = generate_path(path_stack, '', os_type='windows')
-            dir_fib.df_name = dir_path  # Update the name to the full path
-            
+
+            # sanitizing the dir_path here helps with two things:
+            # 1) making sure that the path is valid, so the os.makedirs() is less likely to fail
+            # 2) making sure that our dirfib structure never has invalid characters in it
+            clean_path = sanitize_filepath(dir_path)
+            dir_fib.df_name = clean_path  # Update the name to the full path
+
             try:
-                # Check if the directory path is valid
-                if is_valid_path(dir_path):
-                    os.makedirs(dir_path, exist_ok=True)
-                else:
-                    print(f"Invalid directory path: {dir_path}")
-            except (OSError, ValueError) as e:
-                print(f"Error creating directory: {dir_path}")
+                os.makedirs(clean_path, exist_ok=True)
+            except OSError as e:
+                print(
+                    f"Resetting path stack because there was an Error creating directory: {clean_path}")
                 print(e)
-                # Reset the path stack if there is an error
+                print("Path stack at this point is ", path_stack)
                 path_stack = [(DEFAULT_PATH, 0xBADCAFE)]
 
         elif dir_fib.df_flags & FLAG_SEL_MASK:  # File
             file_path = generate_path(
                 path_stack, dir_fib.df_name, os_type='windows')
-            dir_fib.df_name = file_path  # Update the name to the full path
-            # with open(file_path, 'w') as f:
-            #     pass  # Create an empty file
+            # Update the name to the full sanitized path including the filename
+            dir_fib.df_name = sanitize_filepath(file_path)
 
         else:
             # this resets the path stack if we see a corrupted or unsupported flags value
@@ -340,7 +328,11 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
         file_list (list): List of file markers with filename, size, and content.
         default_path (str): Default directory to save files when no matching marker is found.
     """
-    os.makedirs(default_path, exist_ok=True)
+    try:
+        os.makedirs(default_path, exist_ok=True)
+    except OSError as e:
+        print(f"Error creating directory: {default_path}")
+        print(e)
 
     matched_markers = set()  # Keep track of matched markers
     file_index = 0  # Track the position in file_list
@@ -366,15 +358,23 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
                     # Assuming index 6 contains the file content
                     content = marker[6]
 
-                    # Ensure the directory structure exists
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    try:
+                        # Ensure the directory structure exists
+                        os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-                    # Save the file content
-                    with open(file_path, 'wb') as file:
-                        file.write(content)
+                        # Save the file content
+                        with open(file_path, 'wb') as file:
+                            file.write(content)
 
-                    print(f"Saved file: {file_path}")
+                        print(f"Saved file: {file_path}")
+
+                    except OSError as e:
+                        print(f"Error saving file: {file_path}")
+                        print(e)
+
                     # Mark this marker as matched
+                    # Would we want to mark this even if an error occurs?
+                    # reinvestigate this in the future
                     matched_markers.add(marker_index)
                     break
         else:
@@ -392,11 +392,16 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
         if j not in matched_markers:
             # Save the unmatched marker in the default directory
             fallback_filename = os.path.join(default_path, marker[1])
-            with open(fallback_filename, 'wb') as file:
-                # Save the content directly from the file marker
-                file.write(marker[6])
-
-            print(f"Saved unmatched file marker to: {fallback_filename}")
+            clean_fallback_filename = sanitize_filepath(fallback_filename)
+            try:
+                with open(clean_fallback_filename, 'wb') as file:
+                    # Save the content directly from the file marker
+                    file.write(marker[6])
+                    print(
+                        f"Saved unmatched file marker to: {clean_fallback_filename}")
+            except OSError as e:
+                print(f"Error saving file: {clean_fallback_filename}")
+                print(e)
 
 
 def process_file_markers(file_list, default_path=DEFAULT_PATH):
@@ -408,7 +413,11 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH):
         file_list (list): List of file markers containing filename, size, and content.
         default_path (str): Directory where all files will be dumped.
     """
-    os.makedirs(default_path, exist_ok=True)
+    try:
+        os.makedirs(default_path, exist_ok=True)
+    except OSError as e:
+        print(f"Error creating directory: {default_path}")
+        print(e)
 
     for marker in file_list:
         # Extract filename and content from the marker
@@ -419,11 +428,15 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH):
         # directory
         file_path = os.path.join(default_path, filename)
 
-        # Save the file content
-        with open(file_path, 'wb') as file:
-            file.write(content)
+        try:
+            # Save the file content
+            with open(file_path, 'wb') as file:
+                file.write(content)
 
-        print(f"Saved file: {file_path}")
+            print(f"Saved file: {file_path}")
+        except OSError as e:
+            print(f"Error saving file: {file_path}")
+            print(e)
 
 
 def hex_display(data):
@@ -737,7 +750,8 @@ def main():
     """
 
     if sys.version_info < REQUIRED_PYTHON:
-        sys.stderr.write(f"Python {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]} or higher is required.\n")
+        sys.stderr.write(
+            f"Python {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]} or higher is required.\n")
         sys.exit(1)
 
     parser = argparse.ArgumentParser(
@@ -776,11 +790,15 @@ def main():
 
     # we need to do this no matter what option is chosen
 
-    full_file = load_file(args.backup_file)
-    logging.debug(
-        "Opened file: %s File size is %s",
-        sys.argv[1],
-        len(full_file))
+    try:
+        full_file = load_file(args.backup_file)
+        logging.debug(
+            "Opened file: %s File size is %s",
+            sys.argv[1],
+            len(full_file))
+    except OSError as e:
+        print(f"Error opening backup file: {args.backup_file}")
+        print(e)
 
     full_file = detect_multidisk(full_file)
     offset_list = find_markers(full_file)
@@ -810,8 +828,8 @@ def main():
         decrypted_catalog = decrypt_data(
             full_file[0:offset_list[0]['offset']], full_file[0xD])
 
-        #with open("decryptedcat.bin", "wb") as binary_file:
-            #binary_file.write(bytes(decrypted_catalog))
+        # with open("decryptedcat.bin", "wb") as binary_file:
+        # binary_file.write(bytes(decrypted_catalog))
 
         # Parse DirFib entries using the specified header length
         dir_fibs = parse_dir_fibs(
@@ -842,7 +860,8 @@ def main():
             print()
         """
 
-        file_count = sum(bool(not (f.df_flags & FLAG_DIR_MASK)) for f in dir_fibs)
+        file_count = sum(bool(not (f.df_flags & FLAG_DIR_MASK))
+                         for f in dir_fibs)
         print("We found ", file_count, " file entries in the catalog.")
         match_and_save_files(dir_fibs, file_list)
 
