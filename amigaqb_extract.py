@@ -15,12 +15,14 @@ import os
 import logging
 import struct
 from datetime import datetime, timedelta
+from pathlib import Path
 import numpy as np
 import pandas as pd
-from pathvalidate import sanitize_filename, sanitize_filepath
+from pathvalidate import sanitize_filepath
+
 
 # logging.basicConfig(FILENAME='qb_event.log', encoding='utf-8', level=logging.DEBUG)
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 # Minimum required version
 REQUIRED_PYTHON = (3, 6)
@@ -248,14 +250,14 @@ def decrypt_data(data, encrypt_val):
     return [decrypt_byte(byte, encrypt_val) for byte in data]
 
 
-def generate_path(path_stack, filename, os_type='linux'):
-    """ Define the separator based on the operating system type """
-    separator = '\\' if os_type.lower() == 'windows' else '/'
-
-    # Join the paths from the path stack using the correct separator
-    # No leading separator, and separators between all path components
-    path = separator.join([p[0] for p in path_stack]) + separator + filename
-    return path
+def generate_path(path_stack, filename):
+    """
+    Join the paths from the path stack and filename using pathlib, which handles separators automatically.
+    """
+    # Construct the path using pathlib.Path
+    path = Path(*[p[0] for p in path_stack]) / filename
+    # Convert to string if needed for compatibility with other parts of the code
+    return str(path)
 
 
 def process_dirfibs(dirfibs):
@@ -277,7 +279,7 @@ def process_dirfibs(dirfibs):
 
         if dir_fib.df_flags & FLAG_DIR_MASK:  # Directory
             path_stack.append((dir_fib.df_name, dir_fib.df_filcnt))
-            dir_path = generate_path(path_stack, '', os_type='windows')
+            dir_path = generate_path(path_stack, '')
 
             # sanitizing the dir_path here helps with two things:
             # 1) making sure that the path is valid, so the os.makedirs() is less likely to fail
@@ -296,7 +298,7 @@ def process_dirfibs(dirfibs):
 
         elif dir_fib.df_flags & FLAG_SEL_MASK:  # File
             file_path = generate_path(
-                path_stack, dir_fib.df_name, os_type='windows')
+                path_stack, dir_fib.df_name)
             # Update the name to the full sanitized path including the filename
             dir_fib.df_name = sanitize_filepath(file_path)
 
@@ -380,9 +382,8 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
         else:
             # If no match is found, save the file in the default directory as a
             # fallback
-            print(
-                f"No associated file marker found for catalog entry: {
-                    dir_fib.df_name}")
+            print(f"No associated file marker found for catalog entry: {dir_fib.df_name}")
+
 
         file_index += 1
 
@@ -391,8 +392,9 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
     for j, marker in enumerate(file_list):
         if j not in matched_markers:
             # Save the unmatched marker in the default directory
-            fallback_filename = os.path.join(default_path, marker[1])
-            clean_fallback_filename = sanitize_filepath(fallback_filename)
+            fallback_filename = Path(default_path) / marker[1]
+            clean_fallback_filename = sanitize_filepath(str(fallback_filename))
+
             try:
                 with open(clean_fallback_filename, 'wb') as file:
                     # Save the content directly from the file marker
@@ -426,7 +428,7 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH):
 
         # Define the full path where the file will be saved in the default
         # directory
-        file_path = os.path.join(default_path, filename)
+        file_path = Path(default_path) / filename
 
         try:
             # Save the file content
