@@ -64,6 +64,20 @@ QB tools uses fairly standard LZW compression on its files. It uses a code-size 
 
 ## Release History
 
+Sept 22nd, 2024: Version 0.4.3
+
+    Cross-Platform Path Handling Improvements:
+        Eliminated hard-coded OS-type settings for path separators.
+        Switched to using pathlib for all path manipulations, providing a more modern and Pythonic approach.
+        Replaced custom generate_path function and os.path.join() with pathlib throughout the script.
+        Ensured consistent and cleaner platform handling across different operating systems.
+
+    Bug Fixes:
+        Fixed an issue where certain print statements using f-strings could cause errors on older versions of Python.
+        Ensured all f-strings are correctly formatted for compatibility with a wider range of Python versions.
+
+This update enhances the code's robustness and compatibility across platforms while providing more reliable output handling. I tested this under Windows 11 and Ubuntu 22.04.
+
 Sept 10th, 2024: Version 0.4.2
 
 * Minor update to address issue #8.
