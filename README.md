@@ -64,6 +64,10 @@ QB tools uses fairly standard LZW compression on its files. It uses a code-size 
 
 ## Release History
 
+Sept 2nd, 2024: Version 0.4.4
+
+* Address issue #5 by applying the timestamps, if available in the associated dirfib entry, to directories and files.
+
 Sept 22nd, 2024: Version 0.4.3
 
     Cross-Platform Path Handling Improvements:
