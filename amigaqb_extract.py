@@ -22,7 +22,7 @@ from pathvalidate import sanitize_filepath
 
 
 # logging.basicConfig(FILENAME='qb_event.log', encoding='utf-8', level=logging.DEBUG)
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 # Minimum required version
 REQUIRED_PYTHON = (3, 6)
@@ -370,6 +370,14 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
 
                         print(f"Saved file: {file_path}")
 
+                        # Set the file's timestamps based on DirFib attributes
+                        timestamp = convert_to_unix_timestamp(
+                            dir_fib.df_days, dir_fib.df_minutes, dir_fib.df_ticks
+                        )
+                        # Set both access and modification times
+                        os.utime(file_path, (timestamp, timestamp))
+                        #print(f"Timestamps set for file: {file_path}")
+
                     except OSError as e:
                         print(f"Error saving file: {file_path}")
                         print(e)
@@ -383,7 +391,6 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH):
             # If no match is found, save the file in the default directory as a
             # fallback
             print(f"No associated file marker found for catalog entry: {dir_fib.df_name}")
-
 
         file_index += 1
 
@@ -439,6 +446,55 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH):
         except OSError as e:
             print(f"Error saving file: {file_path}")
             print(e)
+
+
+def convert_to_unix_timestamp(df_days, df_minutes, df_ticks):
+    # Define the start date as January 1, 1978
+    start_date = datetime(1978, 1, 1)
+
+    # Calculate the date based on the number of days since the start date
+    file_date = start_date + timedelta(days=df_days)
+
+    # Calculate the time based on minutes and ticks
+    file_time = timedelta(minutes=df_minutes, seconds=df_ticks / 50.0)
+
+    # Combine date and time
+    full_datetime = file_date + file_time
+
+    # Convert to Unix timestamp
+    return full_datetime.timestamp()
+
+
+def set_directory_timestamps(dirfibs):
+    """
+    Sets timestamps for each directory entry in dirfibs list.
+    """
+    for dir_fib in dirfibs:
+        # Check if this entry is a directory
+        if dir_fib.df_flags & FLAG_DIR_MASK:
+            clean_path = dir_fib.df_name
+
+            # Check if the directory exists before attempting to set timestamps
+            if os.path.exists(clean_path):
+                try:
+                    # Convert to a Unix timestamp based on DirFib attributes
+                    timestamp = convert_to_unix_timestamp(
+                        dir_fib.df_days, dir_fib.df_minutes, dir_fib.df_ticks
+                    )
+
+                    # Apply the timestamp to the directory (both access and modification times)
+                    os.utime(clean_path, (timestamp, timestamp))
+                    # print(f"Timestamps set for directory: {clean_path}")
+
+                except OSError as e:
+                    print(
+                        f"Error setting timestamps for directory: {clean_path}")
+                    print(e)
+            else:
+                print(
+                    f"Directory does not exist, skipping timestamp update: {clean_path}")
+
+    return dirfibs
 
 
 def hex_display(data):
@@ -865,7 +921,9 @@ def main():
         file_count = sum(bool(not (f.df_flags & FLAG_DIR_MASK))
                          for f in dir_fibs)
         print("We found ", file_count, " file entries in the catalog.")
+
         match_and_save_files(dir_fibs, file_list)
+        set_directory_timestamps(dir_fibs)
 
 
 if __name__ == "__main__":
