@@ -16,6 +16,7 @@ import os
 import re
 import logging
 import struct
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 import numpy as np
@@ -23,7 +24,7 @@ from pathvalidate import sanitize_filepath, sanitize_filename
 
 
 # logging.basicConfig(FILENAME='qb_event.log', encoding='utf-8', level=logging.DEBUG)
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 # Minimum required version
 REQUIRED_PYTHON = (3, 6)
@@ -49,6 +50,11 @@ decrypt_table = [
     150, 226, 164, 255, 45, 68, 206, 37, 173, 124, 4, 50, 219, 157, 240, 131,
     249, 191, 210, 136, 99, 95, 200, 228, 165, 109, 160, 194, 58, 121, 14, 107
 ]
+
+# Vectorized form of the decryption table. The cipher is a stateless byte map,
+# so a whole buffer decrypts as one numpy gather (see decrypt_data) instead of a
+# per-byte Python loop.
+DECRYPT_TABLE = np.array(decrypt_table, dtype=np.uint8)
 
 # set flags for the DirFib structure, but used outside the class, so necessary here
 FLAG_DIR_MASK = 128
@@ -82,6 +88,55 @@ ANTIQUE_ENTRY_HEADER = 14  # size(4) date(2) time(2) ticks(2) filcnt(2) prot(1) 
 ANTIQUE_FLAG_DIR = 0x80    # df_Flags bit 7 = directory
 ANTIQUE_NAME_MAX = 30      # df_Name max length before the null
 ANTIQUE_NOTE_MAX = 80      # df comment max length before the null
+
+
+def log_phase(message):
+    """
+    Announce a processing phase on stderr. Kept off stdout so the analysis
+    report (and any piped output) stays clean, but always visible so the user
+    can see what the tool is doing at every step - nothing runs silently.
+    """
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+
+
+class Progress:
+    """
+    Minimal, dependency-free progress indicator for the long loops
+    (decompression, file writing), so the tool never just sits there silently.
+
+    On an interactive terminal it rewrites a single line in place (throttled, so
+    it never floods the console). When stderr is redirected or piped it prints
+    nothing per item and only a final summary line - so it never spams a log or
+    writes carriage returns into a captured stream. All output is ASCII and goes
+    to stderr, leaving stdout for the report.
+    """
+
+    def __init__(self, label, total=None):
+        self.label = label
+        self.total = total
+        self.n = 0
+        self.tty = sys.stderr.isatty()
+        self._last = 0.0
+
+    def _bar(self):
+        return f"{self.n}/{self.total}" if self.total else str(self.n)
+
+    def update(self, n=1):
+        self.n += n
+        if self.tty:
+            now = time.monotonic()
+            if now - self._last >= 0.1:
+                self._last = now
+                sys.stderr.write(f"\r  {self.label}: {self._bar()}   ")
+                sys.stderr.flush()
+
+    def done(self):
+        if self.tty:
+            sys.stderr.write(f"\r  {self.label}: {self._bar()} - done\n")
+        else:
+            sys.stderr.write(f"  {self.label}: {self._bar()}\n")
+        sys.stderr.flush()
 
 
 def is_directory(flags):
@@ -146,6 +201,10 @@ class DirFib:
         self.df_flags = df_flags
         self.df_name = df_name
         self.df_comment = df_comment
+        # Set True when the entry is structurally sound but its datestamp is
+        # out of range (kept by parse_dir_fibs rather than discarded); surfaced
+        # as 'suspect-datestamp' in the recovery report.
+        self.df_suspect_date = False
 
         # Convert df_days to an actual date
         self.date = self.date_from_days_since_1978(df_days)
@@ -235,15 +294,30 @@ class DirFib:
         return 0 <= days < 25000 and 0 <= minutes < 1440 and 0 <= ticks < 3000
 
     @staticmethod
-    def _extract_null_terminated_string(byte_list, offset):
+    def _extract_null_terminated_string(byte_list, offset, max_len=1024):
         """
-        Extracts a null-terminated string from the byte list, retaining extended characters
-        and sanitizing only invalid ones.
+        Extract a null-terminated string starting at `offset`, retaining extended
+        characters and sanitizing only unprintable ones.
+
+        The scan is bounded to `max_len` bytes. A catalog name/comment/link
+        target is short, so no terminator within that span means this isn't a
+        real entry (garbage, or a wrong alignment) - raise so the caller resyncs
+        or stops. Bounding the scan is what stops a constant-byte region (which
+        contains no null at all) from turning every parse attempt into a
+        full-buffer scan - the all-zeros / uniform-fill hang.
         """
-        end = offset
-        while end < len(byte_list) and byte_list[end] != 0x00:
-            end += 1
-        if end >= len(byte_list):
+        n = len(byte_list)
+        limit = min(n, offset + max_len)
+        # bytes/bytearray expose a C-level search; fall back to a loop otherwise.
+        if hasattr(byte_list, 'find'):
+            end = byte_list.find(b'\x00', offset, limit)
+            if end == -1:
+                end = limit
+        else:
+            end = offset
+            while end < limit and byte_list[end] != 0x00:
+                end += 1
+        if end >= limit:
             raise ValueError("Null-terminated string not found")
 
         # Decode string using ISO-8859-1, replacing only invalid characters
@@ -291,13 +365,22 @@ class DirFib:
 # Function to loop through the byte list and parse multiple DirFib structures
 
 
+def _name_looks_valid(dir_fib):
+    """The entry has a plausible name (non-empty, not over-long)."""
+    return bool(dir_fib.df_name) and len(dir_fib.df_name) <= 30
+
+
+def _datestamp_in_range(dir_fib):
+    """The entry's Amiga datestamp fields are all in range."""
+    return (0 <= dir_fib.df_days < 25000 and 0 <= dir_fib.df_minutes < 1440
+            and 0 <= dir_fib.df_ticks < 3000)
+
+
 def _entry_looks_valid(dir_fib):
     """A parsed entry is plausible if its datestamp is in range and it has a
     reasonable name. Used to know where a catalog ends when there is no marker
     boundary after it (the backup catalog) and as a general sanity check."""
-    return (0 <= dir_fib.df_days < 25000 and 0 <= dir_fib.df_minutes < 1440
-            and 0 <= dir_fib.df_ticks < 3000 and dir_fib.df_name
-            and len(dir_fib.df_name) <= 30)
+    return _datestamp_in_range(dir_fib) and _name_looks_valid(dir_fib)
 
 
 def _find_catalog_resync(byte_list, start, header_length, window=8192, need=3):
@@ -323,48 +406,76 @@ def _find_catalog_resync(byte_list, start, header_length, window=8192, need=3):
     return None
 
 
+# Hard bounds that keep catalog parsing fast on any input (the "never hang"
+# guarantee). A real catalog is a tiny fraction of MAX_PRIMARY_CATALOG, so the
+# cap never truncates one; it only bounds a marker-less/garbage region. Re-locks
+# past corruption are capped at MAX_RESYNCS so a pathological region terminates.
+MAX_PRIMARY_CATALOG = 2 * 1024 * 1024
+MAX_RESYNCS = 256
+# The backup-catalog signature also occurs by chance inside compressed data, so
+# an image can contain many false hits; validating each one is not free (it may
+# brute-force the seed). Only the newest few are checked - the real backup
+# catalog is the last valid one - so the scan is bounded no matter how many
+# chance hits (or an adversarial signature-filled region) are present.
+MAX_BACKUP_CANDIDATES = 64
+
+
 def parse_dir_fibs(byte_list, header_length='20', stop_on_garbage=False,
                    resync=False):
     """
-    Parse the directory FIBs from a byte list.
+    Parse the directory FIBs (catalog entries) from a decrypted byte buffer.
 
-    With stop_on_garbage=True the parse stops at the first entry that fails to
-    decode or fails a sanity check, instead of running to the end of the
-    buffer. This is needed for the backup catalog, which has no file marker
-    after it to bound the parse - the region beyond the last entry is padding
-    that decrypts to garbage.
+    Parsing stops at the first entry that can neither be decoded nor validated
+    and from which the stream cannot re-lock - i.e. the end of the readable
+    catalog. This bounds the work (a marker-less or non-QB image hands this a
+    huge garbage region; the original code rescanned it entry by entry - the
+    hang) and avoids emitting garbage entries past the real catalog.
 
-    With resync=True, a corrupt entry mid-stream (which would otherwise desync
+    With resync=True, a corrupt entry mid-catalog (which would otherwise desync
     the variable-length parse and turn every following entry to garbage) is
     skipped by scanning forward to the next point where parsing re-locks, so
-    catalog entries after a bad sector are still recovered with their paths.
+    entries after a bad sector are still recovered with their paths. Re-locking
+    is capped at MAX_RESYNCS. (stop_on_garbage is retained for call
+    compatibility; stopping at unrecoverable garbage is now always the
+    behaviour.)
     """
-    offset = 222  # Starting offset; adjust as needed
-
+    offset = 222  # catalog starts right after the 222-byte first-cylinder header
     dir_fibs = []
+    resyncs = 0
     while offset < len(byte_list):
         try:
             dir_fib, new_offset = DirFib.from_bytes(
                 byte_list, offset, header_length)
+            ok = _entry_looks_valid(dir_fib)
         except (ValueError, struct.error, IndexError):
-            if resync:
+            dir_fib, new_offset, ok = None, None, False
+        if not ok:
+            # Keep a structurally-sound entry whose ONLY defect is an
+            # out-of-range datestamp, as long as the NEXT entry still lines up.
+            # A single bad datestamp field is real corruption that desyncs
+            # nothing (the entry's own length is intact), so the file is
+            # recovered with its correct path and flagged suspect-datestamp -
+            # without loosening the resync guard, which still fires whenever the
+            # name is garbage or the successor doesn't line up (a true desync).
+            if (dir_fib is not None and _name_looks_valid(dir_fib)
+                    and DirFib._next_entry_plausible(
+                        byte_list, new_offset, header_length)):
+                dir_fib.df_suspect_date = True
+                dir_fibs.append(dir_fib)
+                offset = new_offset
+                continue
+            # Genuine corruption: try to re-lock the stream past it. If we can't
+            # (or have re-locked too many times), the readable catalog is over -
+            # stop rather than emit garbage or grind the rest entry by entry.
+            if resync and resyncs < MAX_RESYNCS:
+                resyncs += 1
                 rp = _find_catalog_resync(byte_list, offset + 1, header_length)
                 if rp is not None:
                     offset = rp
                     continue
-            if stop_on_garbage:
-                break
-            raise
-        if not _entry_looks_valid(dir_fib):
-            if resync:
-                rp = _find_catalog_resync(byte_list, offset + 1, header_length)
-                if rp is not None:
-                    offset = rp
-                    continue
-            if stop_on_garbage:
-                break
+            break
         dir_fibs.append(dir_fib)
-        offset = new_offset  # Update offset to the next structure
+        offset = new_offset  # advance to the next entry
 
     return dir_fibs
 
@@ -452,8 +563,24 @@ def decrypt_byte(byte, encrypt_val):
 
 
 def decrypt_data(data, encrypt_val):
-    """Decrypt a list of byte values."""
-    return [decrypt_byte(byte, encrypt_val) for byte in data]
+    """
+    Decrypt a byte buffer with Quarterback's stateless substitution cipher.
+
+    The original is `decryptTable[(x - encryptVal) & 0xFF]` per byte (Monitor.c),
+    with no chained state, so the whole buffer decrypts as one vectorized numpy
+    gather - byte-for-byte identical to decrypt_byte() but orders of magnitude
+    faster, which is what keeps a large (e.g. marker-less) catalog region from
+    feeling like a hang. Returns bytes; every caller treats it as a byte buffer.
+    """
+    # np.asarray(bytes, uint8) misparses a bytes object on numpy 2.x (it treats
+    # it as one numeric string), so route bytes-like inputs through frombuffer;
+    # ndarray/list inputs go through asarray. Both yield a uint8 buffer.
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        arr = np.frombuffer(data, dtype=np.uint8)
+    else:
+        arr = np.asarray(data, dtype=np.uint8)
+    idx = (arr.astype(np.int16) - int(encrypt_val)) & 0xFF
+    return DECRYPT_TABLE[idx].tobytes()
 
 
 def generate_path(path_stack, filename):
@@ -531,15 +658,21 @@ def _write_file(path, content, dir_fib=None):
             os.makedirs(parent, exist_ok=True)
         with open(path, 'wb') as fh:
             fh.write(content)
-        if dir_fib is not None:
-            ts = convert_to_unix_timestamp(
-                dir_fib.df_days, dir_fib.df_minutes, dir_fib.df_ticks)
-            os.utime(path, (ts, ts))
-        return True
     except OSError as e:
         print(f"Error saving file: {path}")
         print(e)
         return False
+    if dir_fib is not None:
+        # Stamp the catalogued modification time, but a corrupt/out-of-range
+        # datestamp (e.g. a kept suspect-datestamp entry) must never fail the
+        # file or abort the run - just leave it unstamped.
+        try:
+            ts = convert_to_unix_timestamp(
+                dir_fib.df_days, dir_fib.df_minutes, dir_fib.df_ticks)
+            os.utime(path, (ts, ts))
+        except (OSError, ValueError, OverflowError):
+            pass
+    return True
 
 
 def _align_markers_to_catalog(catalog_files, markers, matches):
@@ -594,8 +727,26 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH,
     records = []
     catalog_files = [f for f in dir_fibs if not is_directory(f.df_flags)]
 
+    # The catalog basename was sanitized when its path was built (e.g. the
+    # reserved name 'AUX' -> 'AUX_'), but the marker carries the raw name, so a
+    # raw-vs-sanitized comparison would never match those. Sanitize the marker
+    # name the same way before comparing. Cached: matches() is called many times
+    # during the alignment search.
+    _san_cache = {}
+
+    def _san(name):
+        v = _san_cache.get(name)
+        if v is None:
+            try:
+                v = sanitize_filename(name).strip()
+            except (ValueError, TypeError):
+                v = ''
+            _san_cache[name] = v
+        return v
+
     def matches(cf, marker):
-        return Path(cf.df_name).name == marker[1] and cf.df_size1 == marker[2]
+        return (Path(cf.df_name).name == _san(marker[1])
+                and cf.df_size1 == marker[2])
 
     def status_for(marker):
         off, size = marker[0], marker[2]
@@ -608,7 +759,17 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH,
             return "short"
         return "ok"
 
+    def record_status(cf, marker):
+        # A catalog entry kept despite an out-of-range datestamp is flagged so
+        # the user can audit it - unless the marker's data has a worse issue.
+        base = status_for(marker)
+        if base == "ok" and getattr(cf, "df_suspect_date", False):
+            return "suspect-datestamp"
+        return base
+
     start = _align_markers_to_catalog(catalog_files, file_list, matches)
+
+    prog = Progress("Writing files", total=len(file_list))
 
     # Walk catalog and markers together from the aligned start. On a local
     # discrepancy (a catalog entry whose data isn't on these disks, or an extra
@@ -618,16 +779,20 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH,
     N, M, WINDOW = len(catalog_files), len(file_list), 8
     saved = 0
     matched = set()
+    used_cat = set()
     ci, mi = start, 0
     while mi < M:
         if ci < N and matches(catalog_files[ci], file_list[mi]):
             if _write_file(catalog_files[ci].df_name, file_list[mi][6],
                            catalog_files[ci]):
                 saved += 1
-                records.append({'status': status_for(file_list[mi]),
+                records.append({'status': record_status(catalog_files[ci], file_list[mi]),
                                 'size': file_list[mi][2],
                                 'path': catalog_files[ci].df_name})
-            matched.add(mi)
+                prog.update()
+                matched.add(mi)   # only on success: a failed write falls through
+                                  # to the orphan pass -> _unmatched, never lost
+            used_cat.add(ci)      # consumed either way (don't re-try a bad path)
             ci += 1
             mi += 1
             continue
@@ -644,6 +809,45 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH,
         else:
             mi += 1              # lone unmatchable marker (orphan)
 
+    # Name+size fallback. Quarterback doesn't always write file data in catalog
+    # (pre-order) sequence, so the positional walk can orphan a long run of
+    # files whose catalog slots genuinely exist, just out of order. Pair each
+    # still-unmatched marker with an as-yet-unused catalog entry of the same
+    # (sanitized name, size). Slots are kept in catalog order so duplicate-named
+    # files fill sensibly; an assignment among true duplicates is flagged
+    # 'rescued-ambiguous' since the directory can't be proven from name+size.
+    remaining = {}
+    for idx, cf in enumerate(catalog_files):
+        if idx not in used_cat:
+            remaining.setdefault((Path(cf.df_name).name, cf.df_size1), []).append(idx)
+    ambiguous = {k for k, v in remaining.items() if len(v) > 1}
+
+    rescued = 0
+    for mi2, marker in enumerate(file_list):
+        if mi2 in matched:
+            continue
+        slots = remaining.get((_san(marker[1]), marker[2]))
+        if not slots:
+            continue
+        cf = catalog_files[slots.pop(0)]
+        if _write_file(cf.df_name, marker[6], cf):
+            rescued += 1
+            matched.add(mi2)
+            # This placement is itself uncertain (chosen by name+size only), so
+            # always carry the rescued label; if the entry/marker ALSO has a
+            # datestamp or data issue, append it rather than letting one mask the
+            # other - every uncertain dimension stays visible in the report.
+            kind = ("rescued-ambiguous"
+                    if (_san(marker[1]), marker[2]) in ambiguous
+                    else "rescued-namesize")
+            base = record_status(cf, marker)
+            status = kind if base == "ok" else f"{kind}+{base}"
+            records.append({'status': status, 'size': marker[2],
+                            'path': cf.df_name})
+            prog.update()
+
+    # Anything still unmatched: write under a unique name in _unmatched/ so its
+    # data is never lost, even though it can't be placed in the directory tree.
     orphan = 0
     for k, marker in enumerate(file_list):
         if k not in matched:
@@ -653,9 +857,12 @@ def match_and_save_files(dir_fibs, file_list, default_path=DEFAULT_PATH,
                 orphan += 1
                 records.append({'status': 'unmatched', 'size': marker[2],
                                 'path': dest})
+                prog.update()
 
-    print(f"\nMatched {saved} of {len(file_list)} data markers to catalog paths "
-          f"(catalog lists {len(catalog_files)} files).")
+    prog.done()
+    print(f"\nMatched {saved + rescued} of {len(file_list)} data markers to "
+          f"catalog paths (catalog lists {len(catalog_files)} files"
+          + (f"; {rescued} via name+size fallback" if rescued else "") + ").")
     if orphan:
         print(f"{orphan} unmatched data marker(s) written to "
               f"{Path(default_path) / '_unmatched'}/.")
@@ -709,7 +916,9 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH, suspect_regions=N
     used = set()
     records = []
     saved = 0
+    prog = Progress("Writing files (markers only)", total=len(file_list))
     for marker in file_list:
+        prog.update()
         target = _unique_path(default_path, marker[1], used)
         if _write_file(target, marker[6]):
             saved += 1
@@ -725,6 +934,7 @@ def process_file_markers(file_list, default_path=DEFAULT_PATH, suspect_regions=N
                 status = "ok"
             records.append({'status': status, 'size': size, 'path': target})
 
+    prog.done()
     print(f"\nRecovered {saved} of {len(file_list)} files from markers alone "
           f"(no catalog); saved by filename in {default_path}/.")
     return records
@@ -768,7 +978,7 @@ def set_directory_timestamps(dirfibs):
                     os.utime(clean_path, (timestamp, timestamp))
                     # print(f"Timestamps set for directory: {clean_path}")
 
-                except OSError as e:
+                except (OSError, ValueError, OverflowError) as e:
                     print(
                         f"Error setting timestamps for directory: {clean_path}")
                     print(e)
@@ -835,28 +1045,33 @@ def uncompress_me(buf, max_bits=MAX_COMPBIT):
     See https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Welch
     https://rosettacode.org/wiki/LZW_compression
     """
-    bits = np.unpackbits(buf)
+    # Read codes from a bytes copy of the datastream: get_code does an
+    # int.from_bytes per code, which is ~2x faster on bytes than on a numpy
+    # slice. The bit length is simply len*8 (the old np.unpackbits result was
+    # used only for that length).
+    n_bits = len(buf) * 8
+    bbuf = bytes(buf)
 
     next_code = 258
-    decompressed_data = ""
-    my_string = ""
+    out = bytearray()          # decompressed bytes, assembled directly
+    my_string = b""
 
     code_size = 9
 
     # 2^9 - 1
     maximum_table_size = 511
 
-    # Building and initializing the dictionary
-    # ASCII 0-255 in positions 0-255
-
+    # Building and initializing the dictionary: code x maps to the single byte
+    # x. Dictionary values (and my_string) are bytes throughout, so the output
+    # is built with no intermediate text/hex conversion.
     dictionary_size = 256
-    dictionary = dict([(x, chr(x)) for x in range(dictionary_size)])
+    dictionary = {x: bytes([x]) for x in range(dictionary_size)}
 
     # LZW Decompression algorithm
 
     i = 0
 
-    while (i < (len(bits) - 9)):
+    while (i < (n_bits - 9)):
 
         # Don't allow code_size to grow past the file's declared max_bits.
         if next_code > maximum_table_size and code_size != max_bits:
@@ -872,11 +1087,9 @@ def uncompress_me(buf, max_bits=MAX_COMPBIT):
 
             logging.debug("Code size change at bits: %s", i)
             logging.debug("code_size is %s", code_size)
-            logging.debug(
-                "Approximate decompress size is %s",
-                len(decompressed_data))
+            logging.debug("Approximate decompress size is %s", len(out))
 
-        code = get_code(buf, i, code_size)
+        code = get_code(bbuf, i, code_size)
 
         if code == 0xDEADBEEF:
             return str.encode("DEADBEEF")
@@ -893,16 +1106,13 @@ def uncompress_me(buf, max_bits=MAX_COMPBIT):
             # stop and keep whatever decoded cleanly so far rather than crash.
             if not my_string:
                 break
-            dictionary[code] = my_string + (my_string[0])
+            # my_string[0:1] (a 1-byte bytes), NOT my_string[0] (an int).
+            dictionary[code] = my_string + my_string[0:1]
 
-        # This generates a ton of log entries
-        # logging.debug("Decomp-pos:"+str(len(decompressed_data)))
-        # logging.debug("out:"+hex_display(dictionary[code]))
-
-        decompressed_data += dictionary[code]
+        out += dictionary[code]
 
         if len(my_string) != 0:
-            dictionary[next_code] = my_string + (dictionary[code][0])
+            dictionary[next_code] = my_string + dictionary[code][0:1]
             next_code += 1
             logging.debug("next_code is now %s", next_code)
 
@@ -910,17 +1120,7 @@ def uncompress_me(buf, max_bits=MAX_COMPBIT):
 
         i += code_size
 
-    output_data_string = ""
-
-    # Shouldn't we be using hex_display() for this?
-    for data in decompressed_data:
-        if len(hex(ord(data))) < 4:
-            output_data_string += "0"
-
-        output_data_string += hex(ord(data))[2:]
-        output_data_string += " "
-
-    return bytearray.fromhex(output_data_string)
+    return bytes(out)
 
 
 def load_file(filepath):
@@ -1216,7 +1416,9 @@ def uncompress_data(full_file, file_list):
     the same delimiter and data encoding as their file counterparts, so they
     are handled identically here.
     """
+    prog = Progress("Decompressing files", total=len(file_list))
     for j in range(len(file_list)):
+        prog.update()
         if file_list[j][4] in COMPRESSED_TAGS:
             cfm_offset = file_list[j][0]
             # Proper path: use the max code size declared in the marker flag.
@@ -1266,6 +1468,7 @@ def uncompress_data(full_file, file_list):
             file_list[j][6] = full_file[file_list[j][0] +
                                         40:file_list[j][0] + file_list[j][2] + 40]
 
+    prog.done()
     return file_list
 
 
@@ -1495,7 +1698,7 @@ def extract_antique(full_file, args, set_meta=None):
     # #1: catalog size fields that are implausibly large are corrupt; flag them.
     implausible = sum(1 for e in files if not (0 <= e['size'] <= MAX_SANE_FILE))
 
-    flat = args.catalog == 'ignore'
+    flat = args.ignore_catalog
     catalog_desc = (f"plaintext, {len(files)} files, {len(dirs)} dirs; "
                     f"data at offset {data_start}")
     if flat:
@@ -1544,13 +1747,16 @@ def extract_antique(full_file, args, set_meta=None):
                 os.makedirs(parent, exist_ok=True)
             with open(out_path, 'wb') as f:
                 f.write(chunk)
-            ts = convert_to_unix_timestamp(e['date'], e['time'], e['ticks'])
-            os.utime(out_path, (ts, ts))
-            return True
         except OSError as err:
             print(f"Error saving file: {out_path}")
             print(err)
             return False
+        try:
+            ts = convert_to_unix_timestamp(e['date'], e['time'], e['ticks'])
+            os.utime(out_path, (ts, ts))
+        except (OSError, ValueError, OverflowError):
+            pass
+        return True
 
     # Sequentially slice each file's data by its catalogued size. Note that a
     # corrupt *byte* does not desync this (positions come from the catalog, not
@@ -1560,7 +1766,9 @@ def extract_antique(full_file, args, set_meta=None):
     pos = data_start
     saved = partial = missing = best_effort = reanchored = 0
     records = []
+    prog = Progress("Writing files", total=len(files))
     for e in files:
+        prog.update()
         size = e['size']
         plausible = 0 <= size <= MAX_SANE_FILE
 
@@ -1599,6 +1807,7 @@ def extract_antique(full_file, args, set_meta=None):
             records.append({'status': status, 'size': size,
                             'path': out_path_for(e)})
         pos = end
+    prog.done()
 
     if not flat:
         for e in dirs:
@@ -1606,7 +1815,7 @@ def extract_antique(full_file, args, set_meta=None):
                 try:
                     ts = convert_to_unix_timestamp(e['date'], e['time'], e['ticks'])
                     os.utime(e['path'], (ts, ts))
-                except OSError:
+                except (OSError, ValueError, OverflowError):
                     pass
 
     msg = f"\nDone. Saved {saved} files"
@@ -1624,36 +1833,145 @@ def extract_antique(full_file, args, set_meta=None):
                           str(Path(DEFAULT_PATH) / "_recovery_report.txt"))
 
 
+def _catalog_score_at(full_file, base, sample=8192):
+    """
+    Bounded test of whether a real catalog begins at byte offset `base`: recover
+    the seed from this header's own seed byte (base+0x0D) over a small prefix and
+    count how many of the first entries decrypt and parse as plausible DirFibs
+    (entries start 222 bytes after the header). Returns that count (0 = no
+    catalog here). Bounded, so it is cheap to call on every signature candidate.
+    """
+    if base + 0xD >= len(full_file):
+        return 0
+    region = full_file[base:base + min(len(full_file) - base, sample)]
+    prefer = int(full_file[base + 0xD])
+    _seed, score, _brute = recover_seed(region, prefer)
+    return score
+
+
 def find_backup_catalog(full_file):
     """
-    Locate the backup (alternate) catalog, written on the last disk of a set
-    and identified by a 'Qbc2' header (QB_CAT_ID), or the early-V5.0 variant
-    (QB_O_CAT_ID). Returns its byte offset, or None if not present.
+    Locate the backup (alternate) catalog, written on the LAST disk of a set and
+    identified by a 'Qbc2' header (QB_CAT_ID) or the early-V5.0 'Qb\\0\\xC2'
+    variant (QB_O_CAT_ID). Returns its byte offset, or None.
+
+    The signature bytes also occur by chance inside compressed file data, so the
+    first match is often a false positive that recovers nothing (the real backup
+    catalog sits on the last disk, after all the file data). We therefore look at
+    occurrences NEWEST-first and return the first that a bounded parse confirms
+    is a real catalog. Only the last MAX_BACKUP_CANDIDATES occurrences are
+    checked, so a region full of chance (or adversarial) signature hits still
+    terminates quickly - validating each candidate may brute-force the seed.
     """
     raw = full_file.tobytes()
+    offsets = []
     for sig in (b'Qbc2', bytes([0x51, 0x62, 0x00, 0xC2])):
-        idx = raw.find(sig)
-        if idx != -1:
-            return idx
+        start = 0
+        while True:
+            idx = raw.find(sig, start)
+            if idx == -1:
+                break
+            offsets.append(idx)
+            start = idx + 1
+    for idx in sorted(offsets, reverse=True)[:MAX_BACKUP_CANDIDATES]:
+        if _catalog_score_at(full_file, idx) >= 2:   # validates as a catalog
+            return idx                                # newest valid one wins
     return None
 
 
-def prepare_dir_fibs(decrypted_catalog, header_length_arg, stop_on_garbage=False):
+def _load_catalog_from(full_file, base, region):
+    """
+    Recover the encryption seed for the catalog at byte offset `base`, decrypt
+    `region`, and parse it into DirFibs (building paths / creating directories).
+    Returns (dir_fibs_or_None, header_length, seed, seed_score, brute_forced).
+    """
+    prefer_seed = int(full_file[base + 0xD]) if len(full_file) > base + 0xD else 0
+    seed, seed_score, brute = recover_seed(region, prefer_seed)
+    decrypted = decrypt_data(region, seed)
+    dir_fibs, header_length = prepare_dir_fibs(decrypted)
+    return dir_fibs, header_length, seed, seed_score, brute
+
+
+def resolve_catalog(full_file, first_marker, ignore_catalog):
+    """
+    Decide which catalog (if any) drives extraction, trying sources from most to
+    least reliable and never giving up early:
+
+        primary (disk 1)  ->  validated backup (last disk)  ->  none (markers)
+
+    The backup catalog is only consulted when the primary is unreadable, so a
+    healthy backup pays nothing extra; when the primary IS unreadable, the
+    secondary copy on the last disk is tried before falling back to recovering
+    every file from its data marker. Returns (dir_fibs_or_None, hdr,
+    catalog_desc, warnings); dir_fibs is None when the caller should recover
+    from markers alone. No files are written here.
+    """
+    warnings = []
+    if ignore_catalog:
+        hdr = parse_backup_header(full_file, 'modern')
+        return None, hdr, "ignored - recovering from data markers only", warnings
+
+    log_phase("Resolving catalog (primary -> backup -> markers)...")
+
+    # 1) Primary catalog on disk 1, bounded to the first data marker and capped.
+    region = full_file[0:min(first_marker, MAX_PRIMARY_CATALOG)]
+    dir_fibs, hl, seed, score, brute = _load_catalog_from(full_file, 0, region)
+    source, base = "primary", 0
+
+    # 2) Primary unreadable -> the validated backup catalog on the last disk.
+    if not dir_fibs:
+        backup_off = find_backup_catalog(full_file)
+        if backup_off is not None:
+            b_region = full_file[backup_off:backup_off
+                                 + min(len(full_file) - backup_off, 262144)]
+            b_fibs, b_hl, b_seed, b_score, b_brute = _load_catalog_from(
+                full_file, backup_off, b_region)
+            if b_fibs:
+                dir_fibs, hl, seed, score, brute = (
+                    b_fibs, b_hl, b_seed, b_score, b_brute)
+                source, base = f"backup (offset {backup_off})", backup_off
+                warnings.append(
+                    "primary catalog unreadable; recovered from the backup "
+                    f"catalog on the last disk (offset {backup_off})")
+
+    # 3) Neither catalog usable -> caller recovers from data markers alone.
+    if not dir_fibs:
+        hdr = parse_backup_header(full_file, 'modern')
+        return (None, hdr,
+                "primary and backup catalogs unreadable - recovering from markers",
+                warnings)
+
+    if brute:
+        warnings.append(
+            f"catalog seed byte (0x0D) unreadable; recovered seed {seed:#04x} "
+            f"by brute force ({score} entries parse)")
+
+    hdr = parse_backup_header(full_file, 'modern', base=base, seed_override=seed)
+    n_files = sum(not is_directory(f.df_flags) for f in dir_fibs)
+    n_dirs = sum(is_directory(f.df_flags) for f in dir_fibs)
+    n_links = sum(bool(f.df_flags & (FLAG_HLINK_MASK | FLAG_SLINK_MASK))
+                  for f in dir_fibs)
+    desc = (f"{source}, {hl}-byte entries - {n_files} files, {n_dirs} dirs, "
+            f"{n_links} links")
+    return dir_fibs, hdr, desc, warnings
+
+
+def prepare_dir_fibs(decrypted_catalog, header_length_arg='auto'):
     """
     Resolve the entry layout, parse the DirFib tree, and build each entry's
-    path (creating directories). Returns (dir_fibs, header_length), or
-    (None, header_length) if the catalog cannot be parsed - the caller then
-    falls back to marker-only recovery. Parsing stops at the first garbage
-    entry, so a corrupt catalog can't spawn junk directories or derail the run.
+    path (creating directories). Returns (dir_fibs, header_length); dir_fibs is
+    empty/None if the catalog cannot be parsed, and the caller then tries the
+    next recovery source. Parsing stops at the end of the readable catalog
+    (parse_dir_fibs), so a corrupt catalog can't spawn junk directories.
     """
     header_length = (detect_header_length(decrypted_catalog)
                      if header_length_arg == 'auto' else header_length_arg)
     try:
         dir_fibs = parse_dir_fibs(decrypted_catalog, header_length=header_length,
-                                  stop_on_garbage=stop_on_garbage, resync=True)
+                                  resync=True)
         dir_fibs = process_dirfibs(dir_fibs)
     except Exception as e:  # noqa: BLE001 - any catalog damage falls back to markers
-        print(f"Catalog could not be parsed ({e}).")
+        log_phase(f"  (catalog parse failed: {e})")
         return None, header_length
     return dir_fibs, header_length
 
@@ -1885,17 +2203,18 @@ def main():
               "first. A single already-combined file also works."))
 
     parser.add_argument(
-        "--catalog",
-        choices=['primary', 'backup', 'ignore'],
-        default='primary',
+        "--ignore-catalog", "--no-catalog",
+        dest="ignore_catalog",
+        action="store_true",
         help=(
-            "How to use the catalog: 'primary' (default) uses the catalog on "
-            "the first disk; 'backup' uses the alternate catalog on the last "
-            "disk; 'ignore' uses no catalog at all and recovers every file from "
-            "its data marker by filename (duplicate names are kept unique so "
-            "nothing is overwritten). 'primary' and 'backup' automatically fall "
-            "back to this marker-only recovery if the catalog is missing or "
-            "unreadable - a catalog is never required to get the data out."
+            "Ignore the catalog entirely and recover every file directly from "
+            "its data marker, saved by filename (duplicate names kept unique so "
+            "nothing is overwritten). By default no flag is needed: the catalog "
+            "is found and used automatically - the primary catalog on the first "
+            "disk, falling back to the backup catalog on the last disk, then to "
+            "marker-only recovery - so a catalog is never required to get the "
+            "data out. Use this only when you want a flat dump and don't trust "
+            "the catalogued paths."
         )
     )
 
@@ -1904,24 +2223,12 @@ def main():
         action="version",
         version=f"Script Version: {__version__}")
 
-    parser.add_argument(
-        "--header-length",
-        choices=['auto', '16', '20'],
-        default='auto',
-        help=(
-            "Catalog entry layout: '16' for one file size, '20' for two file "
-            "sizes. Default 'auto' detects it automatically by trying both and "
-            "picking the one that parses cleanly; only override if detection "
-            "guesses wrong."
-        )
-    )
-
     args = parser.parse_args()
 
-    # All recovered files and the recovery report go here; create it if needed.
-    os.makedirs(DEFAULT_PATH, exist_ok=True)
+    # The output folder (DEFAULT_PATH) is created lazily by the writers, so an
+    # input with nothing to recover leaves no empty qb_dump behind.
 
-    # Load and combine all inputs (regardless of which catalog option is set).
+    # Load and combine all inputs.
     full_file, set_meta = load_inputs(args.backup_file)
     logging.debug("Combined image size is %s bytes", len(full_file))
 
@@ -1933,6 +2240,7 @@ def main():
 
     full_file, recomb_meta = detect_multidisk(full_file)
     hdr = parse_backup_header(full_file, 'modern')
+    log_phase("Scanning for data markers...")
     offset_list = find_markers(full_file)
     file_list = uncompress_data(full_file, extract_file_info(full_file, offset_list))
     marker_meta = summarize_markers(file_list)
@@ -1950,50 +2258,12 @@ def main():
             "unreadable/filled sectors); flagged 'suspect' in the recovery report")
     first_marker = offset_list[0]['offset'] if offset_list else len(full_file)
 
-    # Resolve which catalog to use and parse it (no files written yet), so the
-    # report can show the catalog's contents before extraction begins.
-    dir_fibs = None
-    if args.catalog == 'ignore':
-        catalog_desc = "ignored - recovering from data markers only"
-    else:
-        # Locate the catalog region to decrypt. The primary catalog is bounded
-        # by the first data marker (parse in full); the backup catalog has no
-        # marker after it, so its parse must stop itself at the first garbage.
-        stop_on_garbage = False
-        if args.catalog == 'backup':
-            backup_off = find_backup_catalog(full_file)
-            if backup_off is None:
-                source, base = "backup catalog not found; using primary", 0
-                region = full_file[0:first_marker]
-            else:
-                source, base = f"backup (alternate), offset {backup_off}", backup_off
-                stop_on_garbage = True
-                region = full_file[backup_off:backup_off
-                                   + min(len(full_file) - backup_off, 262144)]
-        else:
-            source, base = "primary", 0
-            region = full_file[0:first_marker]
-
-        prefer_seed = int(full_file[base + 0xD]) if len(full_file) > base + 0xD else 0
-        seed, seed_score, brute = recover_seed(region, prefer_seed)
-        if brute:
-            extra_warnings.append(
-                f"catalog seed byte (0x0D) unreadable; recovered seed "
-                f"{seed:#04x} by brute force ({seed_score} entries parse)")
-        hdr = parse_backup_header(full_file, 'modern', base=base, seed_override=seed)
-        decrypted_catalog = decrypt_data(region, seed)
-        dir_fibs, header_length = prepare_dir_fibs(
-            decrypted_catalog, args.header_length, stop_on_garbage=stop_on_garbage)
-        if not dir_fibs:
-            catalog_desc = f"{source} - unreadable, falling back to markers"
-            dir_fibs = None
-        else:
-            n_files = sum(not is_directory(f.df_flags) for f in dir_fibs)
-            n_dirs = sum(is_directory(f.df_flags) for f in dir_fibs)
-            n_links = sum(bool(f.df_flags & (FLAG_HLINK_MASK | FLAG_SLINK_MASK))
-                          for f in dir_fibs)
-            catalog_desc = (f"{source}, {header_length}-byte entries - "
-                            f"{n_files} files, {n_dirs} dirs, {n_links} links")
+    # Resolve which catalog (if any) drives extraction - primary, then the
+    # backup on the last disk, then markers-only - parsing it without writing
+    # files yet, so the report can show the catalog before extraction begins.
+    dir_fibs, hdr, catalog_desc, cat_warnings = resolve_catalog(
+        full_file, first_marker, args.ignore_catalog)
+    extra_warnings += cat_warnings
 
     if extra_warnings:
         set_meta = dict(set_meta)
@@ -2001,8 +2271,20 @@ def main():
     report_text = render_report(__version__, set_meta, recomb_meta, hdr,
                                 marker_meta, catalog_desc)
 
-    # Now write the files, collecting a per-file record for the recovery report.
+    # Nothing recoverable: no usable catalog AND no data markers. Say so plainly
+    # and leave no empty output folder behind. This is reached quickly because
+    # all the scanning above is bounded - it never hangs on unidentifiable input.
+    if not dir_fibs and not file_list:
+        print("\nNothing to extract: no readable catalog and no data markers "
+              "were found. If this is a Quarterback backup, the disk(s) may be "
+              "too damaged, or this may not be the first/last disk of the set.")
+        return
+
+    # Write the files, collecting a per-file record for the recovery report.
+    # resolve_catalog chose dir_fibs (catalog-matched) or None (markers-only);
+    # exactly one writer runs.
     if dir_fibs:
+        log_phase("Writing files (catalog-matched)...")
         records = match_and_save_files(dir_fibs, file_list,
                                        suspect_regions=suspect_regions)
         set_directory_timestamps(dir_fibs)

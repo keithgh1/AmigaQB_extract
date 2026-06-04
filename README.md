@@ -55,10 +55,10 @@ Note on compressed files: because LZW builds a fresh dictionary per file, corrup
 ## Usage
 A backup input is typically a 901120-byte `.ADF` floppy image (or several of them). This tool does not yet handle a single large backup image that was not originally written as a series of floppies.
 
-The catalog entry layout (one file size vs. two) is detected automatically, so you normally don't need `--header-length` at all. If automatic detection ever guesses wrong, you can still force `16` or `20` explicitly.
+Everything — the format, the catalog entry layout (one file size vs. two), the compression width, the encryption seed, and which catalog to use — is detected automatically, so the normal command needs no flags at all. The one option, `--ignore-catalog`, is for when you'd rather have a flat dump of files by name than trust the catalogued directory paths.
 
 ```
-usage: amigaqb_extract.py [-h] [--catalog {primary,backup,ignore}] [--version] [--header-length {auto,16,20}] backup_file [backup_file ...]
+usage: amigaqb_extract.py [-h] [--ignore-catalog] [--version] backup_file [backup_file ...]
 
 Restore files from an Amiga Quarterback backup file.
 
@@ -68,15 +68,13 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --catalog {primary,backup,ignore}
-                        How to use the catalog: 'primary' (default) uses the catalog on the first disk; 'backup' uses the alternate catalog on the
-                        last disk; 'ignore' uses no catalog at all and recovers every file from its data marker by filename (duplicate names are kept
-                        unique so nothing is overwritten). 'primary' and 'backup' automatically fall back to this marker-only recovery if the catalog
-                        is missing or unreadable - a catalog is never required to get the data out.
+  --ignore-catalog, --no-catalog
+                        Ignore the catalog entirely and recover every file directly from its data marker, saved by filename (duplicate names
+                        kept unique so nothing is overwritten). By default no flag is needed: the catalog is found and used automatically - the
+                        primary catalog on the first disk, falling back to the backup catalog on the last disk, then to marker-only recovery -
+                        so a catalog is never required to get the data out. Use this only when you want a flat dump and don't trust the
+                        catalogued paths.
   --version             show program's version number and exit
-  --header-length {auto,16,20}
-                        Catalog entry layout: '16' for one file size, '20' for two file sizes. Default 'auto' detects it automatically by trying both
-                        and picking the one that parses cleanly; only override if detection guesses wrong.
 ```
 
 If you have a Quarterback version or configuration this doesn't handle, please email me the details and a sample ADF if you can, and I'll do my best to add support.
@@ -94,6 +92,29 @@ QB tools uses fairly standard LZW compression on its files, with a code size of 
 ```
 
 ## Release History
+
+June 2026: Version 0.18.0 — speed, live progress, automatic catalog fallback, and reliability
+
+This release reworks the tool around three goals: it should never feel like it hangs, it should keep trying every recovery path on a damaged backup, and it should never silently make a wrong guess. Extraction was made fast enough that *bounding* the work — not refusing to start it — is what guarantees responsiveness, and the catalog fallback this README has always described now happens automatically.
+
+**Responsiveness — it never sits there silently or hangs:**
+
+* Live progress on the long operations (decompressing files, writing files) and a one-line note for each phase, so you always see work happening.
+* Catalog decryption is vectorized and the LZW output path was rewritten, more than halving decompression time. Decompressed output is byte-for-byte identical to before.
+* Every scan is now bounded, so any input — a foreign image, random data, an all-zero/erased disk, even a file full of catalog-signature bytes — finishes in about a second instead of spinning. When there is genuinely no catalog and no file data, it says so and writes nothing.
+
+**Automatic layered recovery:**
+
+* The catalog is resolved automatically — the primary catalog on the first disk, falling back to the backup catalog on the last disk when the primary is unreadable, then to marker-only recovery — with no option to set. A zeroed or corrupt first-disk catalog now transparently recovers from the backup copy.
+* The backup-catalog locator was fixed to validate candidates and pick the real one; the signature also occurs by chance inside compressed data, which previously misdirected it.
+
+**Recover more, and flag what's uncertain:**
+
+* Files whose data was written out of catalog order are recovered by name+size when the in-order pass can't place them, and reserved names (e.g. `AUX`) now match their catalog entry.
+* A catalog entry with a single bad field (an out-of-range date) is kept rather than discarded.
+* Every uncertain outcome is labelled in `_recovery_report.txt` — `rescued-namesize`, `rescued-ambiguous` (a duplicate name+size whose directory can't be proven), and `suspect-datestamp` — so nothing questionable is placed silently, and a bad date can never abort a file.
+
+**Simpler interface:** the normal command now takes no options at all (`python amigaqb_extract.py <disks>`). The catalog entry layout is auto-detected (`--header-length` removed), and the old `--catalog primary/backup/ignore` is replaced by an optional `--ignore-catalog` for a flat dump.
 
 June 2026: Versions 0.5.0 – 0.17.0 — major recovery overhaul
 
