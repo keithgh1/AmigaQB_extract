@@ -7,7 +7,7 @@ Contact author Keith Monahan keith@techtravels.org with constructive feedback.
 Bug reports should be filed as github issues. Please include the problem ADF backup file.
 https://github.com/keithgh1/AmigaQB_extract
 
-Copyright (c) 2024 Keith Monahan
+Copyright (c) 2024-2026 Keith Monahan
 Licensed under the MIT License. See LICENSE file in the project root for full license information.
 """
 import argparse

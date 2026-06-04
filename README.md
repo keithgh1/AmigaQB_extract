@@ -182,5 +182,5 @@ August 2024: Version 0.3.0
 
 Minor changes including support for FMRK uncompressed files
 
-Copyright (c) 2024 Keith Monahan
+Copyright (c) 2024-2026 Keith Monahan
 Licensed under the MIT License. See LICENSE file in the project root for full license information.
